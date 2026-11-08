@@ -24,10 +24,12 @@ class SwipePlayer extends ChangeNotifier {
     required SwipeCache cache,
     required SwipeFeedConfig config,
     bool muted = false,
+    double speed = 1,
     this.onAutoplayBlocked,
   })  : _cache = cache,
         _config = config,
-        _muted = muted;
+        _muted = muted,
+        _speed = speed;
 
   final SwipeSource source;
 
@@ -43,6 +45,7 @@ class SwipePlayer extends ChangeNotifier {
   Future<void>? _initFuture;
   bool _wantPlay = false;
   bool _muted;
+  double _speed;
   bool _disposed = false;
   bool _servedByCache = false;
   bool _buffering = false;
@@ -97,6 +100,10 @@ class SwipePlayer extends ChangeNotifier {
         if (_disposed) return;
         await controller.setVolume(_muted ? 0 : 1);
         if (_disposed) return;
+        if (_speed != 1) {
+          await controller.setPlaybackSpeed(_speed);
+          if (_disposed) return;
+        }
         if (startAt > Duration.zero) {
           await controller.seekTo(startAt);
           if (_disposed) return;
@@ -310,7 +317,11 @@ class SwipePlayer extends ChangeNotifier {
     if (c != null) await _guard(() => c.setVolume(muted ? 0 : 1));
   }
 
+  /// Current playback speed (kept across re-initialisations).
+  double get playbackSpeed => _speed;
+
   Future<void> setPlaybackSpeed(double speed) async {
+    _speed = speed;
     final c = controller;
     if (c != null) await _guard(() => c.setPlaybackSpeed(speed));
   }

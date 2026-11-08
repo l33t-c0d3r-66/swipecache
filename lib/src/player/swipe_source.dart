@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:video_player/video_player.dart' show VideoFormat;
 
+import '../reel/reel_data.dart';
+
 /// One item of a feed.
 @immutable
 class SwipeSource {
@@ -11,6 +13,7 @@ class SwipeSource {
     this.headers,
     this.data,
     this.formatHint,
+    this.reel,
   });
 
   /// Stable identifier (e.g. the reel id). Used to keep players across list
@@ -32,6 +35,28 @@ class SwipeSource {
   /// Set to [VideoFormat.hls] or [VideoFormat.dash] for streams whose URL
   /// does not end in `.m3u8` / `.mpd`. Detected automatically otherwise.
   final VideoFormat? formatHint;
+
+  /// Author, caption, music and counters shown by the built-in reel UI
+  /// (`SwipeFeed(reel: SwipeReelOptions(...))`).
+  final SwipeReelData? reel;
+
+  /// A copy with other display data. `id` and `url` never change, so the
+  /// player of the item is kept.
+  SwipeSource copyWith({
+    String? thumbnailUrl,
+    Map<String, String>? headers,
+    Object? data,
+    SwipeReelData? reel,
+  }) =>
+      SwipeSource(
+        id: id,
+        url: url,
+        thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
+        headers: headers ?? this.headers,
+        data: data ?? this.data,
+        formatHint: formatHint,
+        reel: reel ?? this.reel,
+      );
 
   @override
   bool operator ==(Object other) =>

@@ -22,6 +22,7 @@ SwipeFeed(controller: controller) // a complete, swipeable video feed
 - [Usage](#usage)
   - [Quick start (automatic settings)](#quick-start-automatic-settings)
   - [Your own settings](#your-own-settings)
+  - [Reel UI: like, comment, share, save](#reel-ui-like-comment-share-save)
   - [Common tasks](#common-tasks)
   - [Using only the cache](#using-only-the-cache)
 - [Cleanup](#cleanup)
@@ -71,6 +72,7 @@ these two approaches. Both have real problems:
 | **Plays while it saves** | Videos start as fast as normal streaming. While a video plays, it is saved on the phone at the same time, so watching it again uses no data. |
 | **Saves only what is needed** | If a user watches half a video, only that half is saved. Nothing is downloaded twice. |
 | **Loads the next videos early** | The next video is ready before the user swipes, so swiping feels instant. Only the first part of upcoming videos is downloaded, not the whole file. |
+| **Ready-made reel UI** | Instagram- or TikTok-style buttons (like, comment, share, save, more), author, caption, music, double-tap heart, tap to mute and hold to pause. Every part can be changed or replaced, and every action has a callback. |
 | **HLS and DASH too** | Streaming playlists (`.m3u8`, `.mpd`) are saved just like normal video files: every piece of the video is kept, so watching again is instant and works offline. Live streams play normally and are never saved. |
 | **Works with any server** | Even servers that can only send a whole file at once are handled: the file is downloaded once and kept, never downloaded again for each jump in the video. |
 | **Smart about slow-starting files** | Some MP4 files (common for user uploads) can't start until the end of the file is loaded. swipecache detects these and loads the right part early. |
@@ -294,6 +296,170 @@ Other feed options you can change (these have fixed defaults):
 > **Tip:** to see the limits being used right now — automatic or yours — read
 > `SwipeCache.instance.stats.limits` or `controller.limits`. The `autoFields`
 > list tells you which ones were picked automatically.
+
+### Reel UI: like, comment, share, save
+
+swipecache includes the screen elements people know from Instagram Reels and
+TikTok. Turn them on with `reel:` and you get:
+
+- a **button column** on the right: like ♥, comment, share, save, more (…)
+  and a spinning music disc;
+- the **author** (picture, name, verified badge, Follow button), the
+  **caption** (with "more", tappable `#hashtags` and `@mentions`) and the
+  **song** at the bottom;
+- **gestures**: tap to mute/unmute (with a speaker icon, like Instagram),
+  double-tap to like (with a big heart), hold to pause (the buttons hide
+  while holding);
+- a **seek bar** at the bottom that you can drag (it shows the time while
+  dragging);
+- ready-made **sheets** for comments, sharing (with "Copy link") and the "…"
+  menu.
+
+#### 1. Add the reel details to each video
+
+```dart
+SwipeSource(
+  id: reel.id,
+  url: reel.videoUrl,
+  reel: SwipeReelData(
+    author: SwipeReelAuthor(
+      id: reel.userId,
+      name: reel.username,
+      avatarUrl: reel.userPhoto, // initials are shown if missing
+      isVerified: reel.verified,
+      isFollowing: reel.following,
+    ),
+    caption: reel.caption,
+    music: SwipeReelMusic(title: reel.songTitle, artist: reel.songArtist),
+    likeCount: reel.likes,
+    commentCount: reel.comments,
+    shareCount: reel.shares,
+    isLiked: reel.likedByMe,
+    isSaved: reel.savedByMe,
+    shareUrl: reel.webLink, // enables "Copy link"
+  ),
+)
+```
+
+#### 2. Turn on the UI and connect your server
+
+```dart
+SwipeFeed(
+  controller: controller,
+  header: SwipeReelTopBar(onCamera: openCamera), // "Reels" title + camera
+  reel: SwipeReelOptions(
+    onLike: (item, liked) => api.like(item.source.id, liked),
+    onSave: (item, saved) => api.save(item.source.id, saved),
+    onFollow: (item, following) => api.follow(item.reel.author!.id!, following),
+    comments: (item) => SwipeCommentsDelegate(
+      load: (cursor) => api.comments(item.source.id, cursor), // pages
+      send: (text) => api.addComment(item.source.id, text),
+      like: (comment, liked) => api.likeComment(comment.id, liked),
+    ),
+    onShare: (item) => Share.share(item.reel.shareUrl!), // e.g. share_plus
+    moreOptions: (item) => [
+      SwipeReelOption(icon: Icons.flag_outlined, label: 'Report',
+          isDestructive: true, onTap: () => report(item.source.id)),
+    ],
+  ),
+)
+```
+
+**Like, save and follow change on screen immediately.** Your callback then
+talks to the server. If it returns `false` or throws an error, the change is
+undone automatically, so the screen always matches the server.
+
+#### All callbacks
+
+| Callback | When it runs |
+|---|---|
+| `onLike(item, liked)` | Heart tapped or video double-tapped. |
+| `onSave(item, saved)` | Bookmark tapped. |
+| `onFollow(item, following)` | Follow button (TikTok: the "+" on the avatar). |
+| `onComment(item)` | Comment button, if you have your own comments screen. |
+| `comments: (item) => SwipeCommentsDelegate(...)` | Comment button, using the built-in comments sheet. |
+| `onShare(item)` | Share button, if you have your own share action. |
+| `shareOptions: (item) => [...]` | Extra entries in the built-in share sheet. |
+| `onMore(item)` / `moreOptions: (item) => [...]` | "…" button: your own action or the built-in menu. |
+| `onAuthorTap(item)` | Author picture or name. |
+| `onMusicTap(item)` | Song name or music disc. |
+| `onHashtagTap(item, tag)` / `onMentionTap(item, user)` | A `#tag` or `@user` in the caption. |
+| `onEvent(event)` | **Every** action above, plus mute, unmute, pause, resume, hold-to-speed-up, seek and double-tap. One place for analytics. |
+
+A button only appears when it can do something: the comment button needs
+`onComment` or `comments`, share needs `onShare`, `shareOptions` or a
+`shareUrl`, and "…" needs `onMore` or `moreOptions`. Like and save always
+show.
+
+#### Instagram or TikTok look
+
+```dart
+reel: SwipeReelOptions(theme: SwipeReelTheme.instagram()) // default
+reel: SwipeReelOptions(theme: SwipeReelTheme.tiktok())     // solid icons, "+" on avatar
+header: SwipeReelTopBar(style: SwipeReelStyle.tiktok, onSearch: openSearch)
+```
+
+#### Pausing, holding and seeking
+
+Instagram and TikTok handle pausing differently, so you choose:
+
+| | Instagram (default) | TikTok |
+|---|---|---|
+| Tap the video | Mute / unmute | Pause / play (a big ▶ appears) |
+| Hold the video | Pause while holding, buttons hide | Hold the sides: play at 2×. Hold the middle: open the "…" menu |
+| Settings | (nothing to set) | `tapAction: SwipeTapAction.pause`, `holdEdgesToSpeedUp: true`, `holdAction: SwipeHoldAction.menu` |
+
+Other options:
+
+- `holdAction`: `pause`, `speedUp` (2× while holding), `menu` or `none`.
+- `holdSpeed`: the speed while holding, e.g. `1.5`.
+- `showSeekBar: false` hides the progress bar. It is thin while playing,
+  thicker while paused, and can be dragged in both styles.
+- Pausing in code: `controller.pause()`, `controller.play()`,
+  `controller.togglePlay()`. A paused video starts again when the user swipes
+  to the next one, like in both apps.
+- Speed for all videos: `controller.setPlaybackSpeed(1.5)`. For a "Playback
+  speed" menu entry, call `showSwipeSpeedSheet(context, current:
+  controller.playbackSpeed, onSelected: controller.setPlaybackSpeed)`.
+- The pieces work on their own too: `SwipeSeekBar`,
+  `SwipePausedIndicator` and `SwipeSpeedBadge`.
+
+#### Change or replace anything
+
+| You want to… | Use |
+|---|---|
+| Change colours or sizes | `theme: SwipeReelTheme.instagram(likeColor: Colors.pink, iconSize: 30)` |
+| Use other icons | `theme: SwipeReelTheme(icons: SwipeReelIcons.material)`, or `SwipeReelIcons.instagram.copyWith(share: ...)` |
+| Reorder buttons or remove some | `actions: [SwipeReelAction.like, SwipeReelAction.share]` |
+| Add your own button | `SwipeReelAction.custom(icon: Icons.card_giftcard, label: 'Gift', onTap: (item) => ...)` |
+| Put any widget in the button column | `SwipeReelAction.widget((context, item) => MyWidget())` |
+| Replace or wrap one button | `actionBuilder: (context, item, type, button, actions) => type == SwipeReelActionType.save ? MySaveButton(onTap: actions.toggleSave) : button` |
+| Replace the author, caption or music line | `authorBuilder`, `captionBuilder`, `musicBuilder` |
+| Replace the whole button column | `actionsBuilder` |
+| Add something under the caption (product card, tags) | `bottomBuilder` |
+| Add your own widgets on top of everything | `overlayBuilder` (works together with `reel:`) |
+
+Every builder gets `actions`. It runs the built-in behaviour from your own
+widgets, including the instant update and automatic undo: `actions.toggleLike()`,
+`actions.toggleSave()`, `actions.toggleFollow()`, `actions.openComments(context)`,
+`actions.share(context)`, `actions.openMore(context)`.
+
+To build a completely different screen, leave `reel:` out and use the pieces
+in your own `overlayBuilder`: `SwipeActionButton`, `SwipeReelIcon`,
+`SwipeAvatar`, `SwipeAuthorRow`, `SwipeFollowAvatar`, `SwipeCaption`,
+`SwipeMusicRow`, `SwipeMusicDisc`, `SwipeHeartBurst`, `SwipeReelTopBar`,
+`showSwipeCommentsSheet`, `showSwipeShareSheet` and `showSwipeOptionsSheet`.
+
+> **Tip:** for your own buttons on top of the video, wrap them in
+> `SwipeTapTarget` (or use normal Flutter buttons). They react immediately,
+> even though the video also listens for double taps.
+
+To change a reel's numbers from elsewhere, for example after a comment
+was posted on another screen:
+
+```dart
+controller.updateReel(reelId, (r) => r.copyWith(commentCount: r.commentCount + 1));
+```
 
 ### Common tasks
 

@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../cache/prefetch_request.dart';
 import '../cache/swipe_cache.dart';
 import '../device/adaptive_policy.dart';
+import '../reel/reel_data.dart';
 import 'swipe_feed_config.dart';
 import 'swipe_player.dart';
 import 'swipe_source.dart';
@@ -59,6 +60,7 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
   bool _visible = true;
   bool _userPaused = false;
   bool _muted = false;
+  double _speed = 1;
   bool _loadingMore = false;
   bool hasMore = true;
   bool _disposed = false;
@@ -68,6 +70,9 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
   int get index => _index;
   bool get isEmpty => _sources.isEmpty;
   bool get isMuted => _muted;
+
+  /// Playback speed of every video in the feed (1 = normal).
+  double get playbackSpeed => _speed;
   bool get isLoadingMore => _loadingMore;
 
   /// `true` when the user paused the current video by tapping.
@@ -192,6 +197,38 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
     _applyWindow();
   }
 
+  /// The item with [id], or `null`.
+  SwipeSource? sourceById(String id) {
+    for (final source in _sources) {
+      if (source.id == id) return source;
+    }
+    return null;
+  }
+
+  /// Replaces the display data of item [id] (caption, counters...). The
+  /// video keeps playing: `id` and `url` can not change this way.
+  void updateSource(String id, SwipeSource Function(SwipeSource source) update) {
+    if (_disposed) return;
+    final at = _sources.indexWhere((s) => s.id == id);
+    if (at < 0) return;
+    final old = _sources[at];
+    final updated = update(old);
+    assert(updated.id == old.id && updated.url == old.url,
+        'updateSource can not change id or url');
+    _sources[at] = updated;
+    notifyListeners();
+  }
+
+  /// Updates the reel data of item [id], e.g. after a like from elsewhere:
+  ///
+  /// ```dart
+  /// controller.updateReel(id, (r) => r.copyWith(commentCount: r.commentCount + 1));
+  /// ```
+  void updateReel(String id, SwipeReelData Function(SwipeReelData reel) update) {
+    updateSource(id,
+        (s) => s.copyWith(reel: update(s.reel ?? const SwipeReelData())));
+  }
+
   void removeSource(String id) {
     final at = _sources.indexWhere((s) => s.id == id);
     if (at < 0) return;
@@ -231,6 +268,16 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void togglePlay() => _userPaused ? play() : pause();
+
+  /// Plays every video at [speed] (e.g. 0.5, 1.5, 2) until changed again.
+  void setPlaybackSpeed(double speed) {
+    assert(speed > 0);
+    _speed = speed;
+    for (final player in _players.values) {
+      unawaited(player.setPlaybackSpeed(speed));
+    }
+    notifyListeners();
+  }
 
   void setMuted(bool muted) {
     _muted = muted;
@@ -312,6 +359,7 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
           cache: _cache,
           config: config,
           muted: _muted,
+          speed: _speed,
           onAutoplayBlocked: () {
             if (!_muted && !_disposed) setMuted(true);
           },

@@ -59,3 +59,28 @@
 * Segment file handles are released as soon as a segment has been served.
 * Verbose logging (`SwipeLogLevel.verbose`) prints one line per proxy request
   with range, time and bytes from disk / network.
+* Reel UI (`SwipeFeed(reel: SwipeReelOptions(...))`): Instagram- or
+  TikTok-style action rail (like, comment, share, save, more, custom
+  actions), author row / follow badge, expandable caption with tappable
+  hashtags and mentions, music ticker and disc, double-tap heart, tap to
+  mute, hold to pause. Vector icons for both styles (`SwipeReelIcons`).
+* Optimistic like/save/follow with automatic rollback when the callback
+  returns `false` or throws; `onEvent` reports every action.
+* Built-in sheets: comments (paging, posting, comment likes), share (copy
+  link + custom targets) and options.
+* Everything replaceable: `actionBuilder`, part builders, `SwipeReelTheme`,
+  custom icon sets; building blocks exported for fully custom overlays.
+* `SwipeFeed.header` for a fixed top bar (`SwipeReelTopBar`).
+* `SwipeSource.reel`, `SwipeSource.copyWith`, `SwipeFeedController.updateReel`
+  / `updateSource` / `sourceById`.
+* Buttons on top of the video react immediately: double taps are detected
+  without holding back other taps.
+* Pause like Instagram or TikTok: `tapAction` (mute / pause), `holdAction`
+  (pause / speedUp / menu), `holdEdgesToSpeedUp` and `holdSpeed`; TikTok
+  style pause mark (`SwipePausedIndicator`) and "2x" pill
+  (`SwipeSpeedBadge`).
+* `SwipeSeekBar`: smooth, draggable progress bar (thicker while paused, time
+  shown and UI hidden while dragging, hidden for live streams).
+* `SwipeFeedController.setPlaybackSpeed` / `playbackSpeed` (kept for new
+  videos) and `showSwipeSpeedSheet`.
+* New events: `speedUp`, `seek`.
