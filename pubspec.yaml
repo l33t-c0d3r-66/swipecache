@@ -1,0 +1,36 @@
+name: swipecache
+description: >-
+  High-performance short-video (reels) feed for Flutter with stream-while-caching,
+  chunked disk cache, smart prefetching and a pooled player engine for instant swipes.
+version: 0.1.0
+homepage: https://github.com/l33t-c0d3r-66/swipecache
+repository: https://github.com/l33t-c0d3r-66/swipecache
+issue_tracker: https://github.com/l33t-c0d3r-66/swipecache/issues
+topics:
+  - video
+  - cache
+  - reels
+  - video-player
+  - feed
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+platforms:
+  android:
+  ios:
+  macos:
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.0
+  path_provider: ^2.1.0
+  video_player: ^2.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  video_player_platform_interface: ^6.2.0
