@@ -1,5 +1,10 @@
 # swipecache
 
+[![pub version](https://img.shields.io/pub/v/swipecache.svg)](https://pub.dev/packages/swipecache)
+[![pub points](https://img.shields.io/pub/points/swipecache)](https://pub.dev/packages/swipecache/score)
+[![pub likes](https://img.shields.io/pub/likes/swipecache)](https://pub.dev/packages/swipecache/score)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A Flutter package for building **short video feeds** — the full-screen,
 swipe-up-for-the-next-video screens you know from TikTok, Instagram Reels and
 YouTube Shorts.
