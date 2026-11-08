@@ -1,7 +1,7 @@
 name: swipecache
 description: >-
-  High-performance short-video (reels) feed for Flutter with stream-while-caching,
-  chunked disk cache, smart prefetching and a pooled player engine for instant swipes.
+  Instagram/TikTok-style reels feed for Flutter: stream-while-caching (MP4, HLS, DASH),
+  smart prefetching, pooled players and a customizable like/comment/share UI.
 version: 0.1.0
 homepage: https://github.com/l33t-c0d3r-66/swipecache
 repository: https://github.com/l33t-c0d3r-66/swipecache
@@ -11,7 +11,6 @@ topics:
   - cache
   - reels
   - video-player
-  - feed
   - hls
 
 environment:
