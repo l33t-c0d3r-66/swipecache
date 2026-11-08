@@ -16,7 +16,16 @@ class TestOrigin {
   final HttpServer _server;
   final Map<String, Uint8List> files = {};
   bool supportRanges = true;
+
+  /// Sends `Accept-Ranges` twice, like some real CDNs.
+  bool duplicateHeaders = false;
   ContentType contentType = ContentType('video', 'mp4');
+
+  /// Per-file content types (fall back to [contentType]).
+  final Map<String, ContentType> types = {};
+
+  /// Requests per path.
+  final Map<String, int> hits = {};
 
   /// Bytes per write; with [delayPerPacket] simulates a slow network.
   int packetSize = 16 * 1024;
@@ -30,6 +39,11 @@ class TestOrigin {
   int maxActive = 0;
 
   String url(String name) => 'http://127.0.0.1:${_server.port}/$name';
+
+  void addText(String name, String text, ContentType type) {
+    files[name] = Uint8List.fromList(text.codeUnits);
+    types[name] = type;
+  }
 
   Uint8List addRandom(String name, int length, {int seed = 1}) {
     final random = Random(seed);
@@ -59,7 +73,9 @@ class TestOrigin {
 
   Future<void> _serve(HttpRequest request) async {
     final response = request.response;
-    final data = files[request.uri.pathSegments.join('/')];
+    final name = request.uri.pathSegments.join('/');
+    hits[name] = (hits[name] ?? 0) + 1;
+    final data = files[name];
     if (data == null) {
       response.statusCode = 404;
       await response.close();
@@ -81,7 +97,12 @@ class TestOrigin {
       response.statusCode = 206;
       response.headers.set('content-range', 'bytes $start-$end/${data.length}');
     }
-    response.headers.contentType = contentType;
+    response.headers.contentType = types[name] ?? contentType;
+    if (duplicateHeaders) {
+      response.headers
+        ..add('accept-ranges', 'bytes')
+        ..add('accept-ranges', 'bytes');
+    }
     response.contentLength = end - start + 1;
     try {
       for (var pos = start; pos <= end; pos += packetSize) {

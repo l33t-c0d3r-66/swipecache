@@ -36,6 +36,7 @@ class CacheEntry {
     required this.chunkSize,
     required OriginClient client,
     Map<String, String>? headers,
+    this.group,
     int? lastAccessMs,
     int? createdMs,
   })  : _client = client,
@@ -45,6 +46,11 @@ class CacheEntry {
 
   final String key;
   final Uri url;
+
+  /// Key of the video this resource belongs to (the HLS/DASH manifest of a
+  /// segment). `null` for standalone files. Limits and eviction treat a
+  /// group as one video.
+  final String? group;
   Map<String, String> headers;
   final Directory directory;
   final int chunkSize;
@@ -53,6 +59,11 @@ class CacheEntry {
   int? _totalLength;
   String _contentType = 'video/mp4';
   ChunkBitmap? _bitmap;
+  bool _rangesUnsupported = false;
+
+  /// Where the origin redirected this URL to (manifests resolve relative
+  /// references against it).
+  Uri? resolvedUrl;
 
   int lastAccessMs;
   int _generation = 0;
@@ -86,6 +97,9 @@ class CacheEntry {
   bool get isProbed => _totalLength != null;
   bool get isRemoved => _removed;
   bool get isComplete => _bitmap?.isComplete ?? false;
+
+  /// The origin ignores `Range` requests and always sends the whole file.
+  bool get rangesUnsupported => _rangesUnsupported;
   int get chunkCount => _bitmap?.chunkCount ?? 0;
 
   /// Bytes currently stored on disk.
@@ -179,23 +193,63 @@ class CacheEntry {
   /// file extension in that case.
   String _resolveContentType(String? header) {
     final type = header?.split(';').first.trim().toLowerCase() ?? '';
-    if (type.startsWith('video/') || type.startsWith('audio/')) return type;
+    if (type.startsWith('video/') ||
+        type.startsWith('audio/') ||
+        type.startsWith('text/') ||
+        _keptTypes.contains(type)) {
+      return type;
+    }
     final path = url.path.toLowerCase();
-    const byExtension = {
-      '.mov': 'video/quicktime',
-      '.m4v': 'video/x-m4v',
-      '.webm': 'video/webm',
-      '.mkv': 'video/x-matroska',
-      '.3gp': 'video/3gpp',
-      '.ts': 'video/mp2t',
-      '.mp3': 'audio/mpeg',
-      '.m4a': 'audio/mp4',
-      '.aac': 'audio/aac',
-    };
-    for (final MapEntry(key: ext, value: mime) in byExtension.entries) {
+    for (final MapEntry(key: ext, value: mime) in _typesByExtension.entries) {
       if (path.endsWith(ext)) return mime;
     }
     return 'video/mp4';
+  }
+
+  static const _keptTypes = {
+    'application/vnd.apple.mpegurl',
+    'application/x-mpegurl',
+    'application/dash+xml',
+    'application/mp4',
+  };
+
+  static const _typesByExtension = {
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/x-m4v',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+    '.3gp': 'video/3gpp',
+    '.ts': 'video/mp2t',
+    '.m4s': 'video/iso.segment',
+    '.cmfv': 'video/mp4',
+    '.cmfa': 'audio/mp4',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.vtt': 'text/vtt',
+    '.webvtt': 'text/vtt',
+    '.m3u8': 'application/vnd.apple.mpegurl',
+    '.mpd': 'application/dash+xml',
+  };
+
+  /// Stores a resource that was downloaded in one piece (a manifest).
+  Future<void> storeWhole(Uint8List bytes, String? contentType) async {
+    if (_removed) return;
+    _applyLength(bytes.length, contentType);
+    final generation = _generation;
+    for (var i = 0; i < chunkCount; i++) {
+      if (hasChunk(i)) continue;
+      final start = chunkStart(i);
+      await _writeChunk(
+          i, Uint8List.sublistView(bytes, start, chunkEnd(i) + 1), generation);
+    }
+  }
+
+  /// Reads the whole resource. Only valid when [isComplete].
+  Future<Uint8List> readAll() async {
+    final total = _totalLength ?? 0;
+    if (total == 0) return Uint8List(0);
+    return read(0, total - 1);
   }
 
   // ---------------------------------------------------------------------------
@@ -317,6 +371,7 @@ class CacheEntry {
     final requestEnd = end ?? (start + chunkSize - 1);
     final stopwatch = Stopwatch()..start();
     var received = 0;
+    var preStart = 0;
     OriginResponse? response;
     try {
       response = await _client.get(url, headers, start, requestEnd,
@@ -337,6 +392,14 @@ class CacheEntry {
         position = 0;
         final length = response.contentLength;
         if (length >= 0) _applyLength(length, response.header('content-type'));
+        final total = _totalLength;
+        if (total != null &&
+            (start > 0 || requestEnd < total - 1) &&
+            !_rangesUnsupported) {
+          SwipeLog.i('Origin ignores Range requests: $url');
+          _rangesUnsupported = true;
+          _scheduleMetaWrite();
+        }
       } else if (status == HttpStatus.requestedRangeNotSatisfiable) {
         final range = parseContentRange(response.header('content-range'));
         if (range?.total == 0) _applyLength(0, response.header('content-type'));
@@ -361,38 +424,25 @@ class CacheEntry {
       }
       final stopAt = (end ?? chunkEnd(realLast)).clamp(0, total - 1);
 
+      // A 200 answer starts at byte 0. Those bytes are valid too: store the
+      // missing chunks before the requested start instead of discarding
+      // them, so a server without Range support is downloaded once.
+      if (position < start) {
+        for (var i = 0; i < start ~/ chunkSize; i++) {
+          if (hasChunk(i) || _inflight.containsKey(i)) continue;
+          final completer = Completer<void>();
+          _inflight[i] = completer;
+          _inflightProgress[i] = progress;
+          claimed[i] = completer;
+        }
+      }
+
       final builder = BytesBuilder(copy: false);
-      var chunkIndex = start ~/ chunkSize;
+      var chunkIndex = position ~/ chunkSize;
       var bufferStart = chunkStart(chunkIndex);
 
-      await for (final piece in response.stream) {
-        if (_removed || generation != _generation) break;
-        if (isCancelled?.call() ?? false) break;
-        progress.lastDataMs = DateTime.now().millisecondsSinceEpoch;
-        var data = piece is Uint8List ? piece : Uint8List.fromList(piece);
-
-        // Discard bytes before the requested start (200 responses).
-        if (position < start) {
-          final skip = start - position;
-          if (skip >= data.length) {
-            position += data.length;
-            continue;
-          }
-          data = Uint8List.sublistView(data, skip);
-          position = start;
-        }
-        // Trim anything past the end we care about.
-        final remaining = stopAt - position + 1;
-        if (remaining <= 0) break;
-        if (data.length > remaining) {
-          data = Uint8List.sublistView(data, 0, remaining);
-        }
-
-        received += data.length;
-        if (sink != null) await sink(data, position);
-        position += data.length;
-
-        // Assemble complete chunks and persist them.
+      // Assembles complete chunks and persists them.
+      Future<void> assemble(Uint8List data) async {
         var cursor = 0;
         while (cursor < data.length) {
           final chunkEndOffset = chunkEnd(chunkIndex);
@@ -412,20 +462,50 @@ class CacheEntry {
             bufferStart = chunkStart(chunkIndex);
           }
         }
+      }
+
+      await for (final piece in response.stream) {
+        if (_removed || generation != _generation) break;
+        if (isCancelled?.call() ?? false) break;
+        progress.lastDataMs = DateTime.now().millisecondsSinceEpoch;
+        var data = piece is Uint8List ? piece : Uint8List.fromList(piece);
+
+        // Bytes before the requested start (200 responses): store only.
+        if (position < start) {
+          final take = start - position < data.length
+              ? start - position
+              : data.length;
+          await assemble(Uint8List.sublistView(data, 0, take));
+          position += take;
+          preStart += take;
+          if (take == data.length) continue;
+          data = Uint8List.sublistView(data, take);
+        }
+        // Trim anything past the end we care about.
+        final remaining = stopAt - position + 1;
+        if (remaining <= 0) break;
+        if (data.length > remaining) {
+          data = Uint8List.sublistView(data, 0, remaining);
+        }
+
+        received += data.length;
+        if (sink != null) await sink(data, position);
+        position += data.length;
+        await assemble(data);
         if (position > stopAt) break;
       }
       return received;
     } finally {
       stopwatch.stop();
       response?.detach();
-      _client.networkBytes += received;
+      _client.networkBytes += received + preStart;
       for (final index in claimed.keys.toList()) {
         release(index);
       }
       // Player-driven downloads are throttled by playback (back-pressure), so
       // only unthrottled downloads are representative of network speed.
-      if (received > 0 && !foreground) {
-        _client.reportThroughput(received, stopwatch.elapsed);
+      if (received + preStart > 0 && !foreground) {
+        _client.reportThroughput(received + preStart, stopwatch.elapsed);
       }
     }
   }
@@ -490,6 +570,9 @@ class CacheEntry {
   Map<String, Object?> toJson() => {
         'v': 1,
         'url': url.toString(),
+        if (group != null) 'group': group,
+        if (_rangesUnsupported) 'nr': true,
+        if (resolvedUrl != null) 'base': resolvedUrl.toString(),
         'total': _totalLength,
         'type': _contentType,
         'chunk': chunkSize,
@@ -516,9 +599,13 @@ class CacheEntry {
       directory: directory,
       chunkSize: chunkSize,
       client: client,
+      group: json['group'] as String?,
       lastAccessMs: json['access'] as int?,
       createdMs: json['created'] as int?,
     );
+    entry._rangesUnsupported = json['nr'] == true;
+    final base = json['base'];
+    if (base is String) entry.resolvedUrl = Uri.tryParse(base);
     final total = json['total'] as int?;
     if (total != null) {
       entry._totalLength = total;

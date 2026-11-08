@@ -18,7 +18,7 @@ void main() {
     // ignore: unawaited_futures
     runZonedGuarded(() async {
       final cache = SwipeCache.custom();
-      await cache.init(config: SwipeCacheConfig(directory: dir));
+      await cache.init(config: SwipeCacheConfig(directoryPath: dir.path));
       origin.addRandom('big.mp4', 6 * 1024 * 1024);
       final uri = cache.playableUri(origin.url('big.mp4'));
       // Warm the cache so the proxy writes from disk as fast as it can.

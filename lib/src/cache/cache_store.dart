@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import '../device/adaptive_policy.dart';
 import '../util/hash.dart';
@@ -28,6 +29,9 @@ class CacheStore {
   final Map<String, CacheEntry> _entries = {};
   final Set<String> _protected = {};
   int _totalBytes = 0;
+
+  /// Bytes per video (a standalone file, or all resources of a stream).
+  final Map<String, int> _groupBytes = {};
   Timer? _evictTimer;
   Timer? _sweepTimer;
   bool _evicting = false;
@@ -37,13 +41,30 @@ class CacheStore {
   /// long without use (they are recreated on demand).
   static const _emptyEntryIdle = Duration(minutes: 10);
 
-
   int get totalBytes => _totalBytes;
   int get entryCount => _entries.length;
 
-  /// Videos with at least one cached byte.
-  int get cachedVideoCount =>
-      _entries.values.where((e) => e.cachedBytes > 0).length;
+  /// Videos with at least one cached byte (a stream counts once).
+  int get cachedVideoCount => _groupBytes.length;
+
+  /// The video [entry] belongs to.
+  static String groupOf(CacheEntry entry) => entry.group ?? entry.key;
+
+  /// Bytes stored for the video identified by [group].
+  int groupBytes(String group) => _groupBytes[group] ?? 0;
+
+  void _account(CacheEntry entry, int delta) {
+    if (delta == 0) return;
+    _totalBytes += delta;
+    if (_totalBytes < 0) _totalBytes = 0;
+    final group = groupOf(entry);
+    final bytes = (_groupBytes[group] ?? 0) + delta;
+    if (bytes > 0) {
+      _groupBytes[group] = bytes;
+    } else {
+      _groupBytes.remove(group);
+    }
+  }
   int get openFileCount => _entries.values.where((e) => e.hasOpenFile).length;
   Iterable<CacheEntry> get entries => _entries.values;
 
@@ -94,7 +115,8 @@ class CacheStore {
         await _safeDelete(file);
       }
     }
-    SwipeLog.i('Cache opened: ${_entries.length} videos, $_totalBytes bytes');
+    SwipeLog.i('Cache opened: $cachedVideoCount videos '
+        '(${_entries.length} files), $_totalBytes bytes');
     _sweepTimer = Timer.periodic(config.sweepInterval, (_) => unawaited(sweep()));
     await evict();
   }
@@ -105,8 +127,9 @@ class CacheStore {
 
   CacheEntry? lookup(Uri url) => _entries[keyFor(url)];
 
-  /// Returns the entry for [url], creating it on first use.
-  CacheEntry obtain(Uri url, {Map<String, String>? headers}) {
+  /// Returns the entry for [url], creating it on first use. [group] links a
+  /// stream resource to its video.
+  CacheEntry obtain(Uri url, {Map<String, String>? headers, String? group}) {
     final key = keyFor(url);
     final existing = _entries[key];
     if (existing != null) {
@@ -121,6 +144,7 @@ class CacheStore {
       chunkSize: config.chunkSize,
       client: client,
       headers: headers,
+      group: group,
     );
     _register(entry);
     return entry;
@@ -128,10 +152,9 @@ class CacheStore {
 
   void _register(CacheEntry entry) {
     _entries[entry.key] = entry;
-    _totalBytes += entry.cachedBytes;
+    _account(entry, entry.cachedBytes);
     entry.onChunkStored = (stored, delta) {
-      _totalBytes += delta;
-      if (_totalBytes < 0) _totalBytes = 0;
+      _account(stored, delta);
       if (_overLimits()) scheduleEviction();
     };
     entry.onDiskFull = (_) {
@@ -183,19 +206,31 @@ class CacheStore {
       }
       final maxVideos = policy.maxCachedVideos;
 
-      final candidates = _entries.values
-          .where((e) => e.pins == 0 && !_protected.contains(e.key))
-          .toList()
-        ..sort((a, b) => a.lastAccessMs.compareTo(b.lastAccessMs));
+      // Videos (groups) are evicted as a whole, least recently watched first.
+      final groups = <String, List<CacheEntry>>{};
+      for (final entry in _entries.values) {
+        groups.putIfAbsent(groupOf(entry), () => []).add(entry);
+      }
+      final candidates = [
+        for (final MapEntry(key: group, value: members) in groups.entries)
+          if (!_protected.contains(group) && members.every((e) => e.pins == 0))
+            (
+              group: group,
+              members: members,
+              lastAccess: members.map((e) => e.lastAccessMs).reduce(math.max),
+            ),
+      ]..sort((a, b) => a.lastAccess.compareTo(b.lastAccess));
       var videos = cachedVideoCount;
-      for (final entry in candidates) {
-        final expired = now - entry.lastAccessMs > maxAgeMs;
-        final hasData = entry.cachedBytes > 0;
+      for (final candidate in candidates) {
+        final expired = now - candidate.lastAccess > maxAgeMs;
+        final hasData = groupBytes(candidate.group) > 0;
         final overBytes = _totalBytes > byteTarget;
         final overCount = videos > maxVideos;
         if (!expired && !overBytes && !overCount) continue;
         if (!expired && !hasData) continue; // costs no disk
-        await remove(entry.key);
+        for (final entry in candidate.members) {
+          await remove(entry.key);
+        }
         evictedCount++;
         if (hasData) videos--;
       }
@@ -217,7 +252,7 @@ class CacheStore {
       }
       if (entry.cachedBytes == 0 &&
           entry.pins == 0 &&
-          !_protected.contains(entry.key) &&
+          !_protected.contains(groupOf(entry)) &&
           !entry.hasOpenFile &&
           idleMs > _emptyEntryIdle.inMilliseconds) {
         await remove(entry.key);
@@ -236,24 +271,29 @@ class CacheStore {
   Future<void> remove(String key) async {
     final entry = _entries.remove(key);
     if (entry == null) return;
-    _totalBytes -= entry.cachedBytes;
-    if (_totalBytes < 0) _totalBytes = 0;
+    _account(entry, -entry.cachedBytes);
+    entry.onChunkStored = null;
     await entry.delete();
+  }
+
+  /// Removes a video with all its resources (stream segments).
+  Future<void> removeGroup(String group) async {
+    for (final entry in _entries.values.toList()) {
+      if (groupOf(entry) == group) await remove(entry.key);
+    }
   }
 
   /// Deletes every video that is not currently being played. Returns the
   /// number of videos kept because they are in use.
   Future<int> clear() async {
-    var kept = 0;
-    for (final key in _entries.keys.toList()) {
-      final entry = _entries[key]!;
-      if (entry.pins > 0) {
-        kept++;
-        continue;
-      }
-      await remove(key);
+    final inUse = {
+      for (final entry in _entries.values)
+        if (entry.pins > 0) groupOf(entry),
+    };
+    for (final entry in _entries.values.toList()) {
+      if (!inUse.contains(groupOf(entry))) await remove(entry.key);
     }
-    return kept;
+    return inUse.length;
   }
 
   Future<void> close() async {

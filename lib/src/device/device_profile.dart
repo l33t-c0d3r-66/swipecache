@@ -1,7 +1,5 @@
-import 'dart:ffi';
-import 'dart:io';
-
-import 'package:ffi/ffi.dart';
+import 'device_probe_stub.dart'
+    if (dart.library.io) 'device_probe_io.dart' as probe;
 
 /// Coarse capability class of the device, used by automatic limits.
 enum SwipeDeviceTier { low, mid, high }
@@ -40,20 +38,16 @@ class SwipeDeviceProfile {
   }
 
   /// Reads the profile of the running device. Never throws.
+  ///
+  /// On the iOS simulator the Mac's memory and processors would be reported,
+  /// so the profile of the simulated iPhone/iPad model is used instead.
   static SwipeDeviceProfile detect() {
-    int? ram;
     try {
-      if (Platform.isAndroid || Platform.isLinux) {
-        ram = parseMemInfo(File('/proc/meminfo').readAsStringSync());
-      } else if (Platform.isIOS || Platform.isMacOS) {
-        ram = _darwinMemSize();
-      }
-    } catch (_) {}
-    var cores = 0;
-    try {
-      cores = Platform.numberOfProcessors;
-    } catch (_) {}
-    return SwipeDeviceProfile(totalRamBytes: ram, cpuCores: cores);
+      final (ram, cores) = probe.probeDevice();
+      return SwipeDeviceProfile(totalRamBytes: ram, cpuCores: cores);
+    } catch (_) {
+      return unknown;
+    }
   }
 
   /// Extracts `MemTotal` (in bytes) from `/proc/meminfo` content.
@@ -64,24 +58,37 @@ class SwipeDeviceProfile {
     return int.parse(match.group(1)!) * 1024;
   }
 
-  static int? _darwinMemSize() {
-    final sysctl = DynamicLibrary.process().lookupFunction<
-        Int32 Function(Pointer<Utf8>, Pointer<Void>, Pointer<Size>,
-            Pointer<Void>, Size),
-        int Function(Pointer<Utf8>, Pointer<Void>, Pointer<Size>, Pointer<Void>,
-            int)>('sysctlbyname');
-    final name = 'hw.memsize'.toNativeUtf8();
-    final value = calloc<Uint64>();
-    final size = calloc<Size>()..value = sizeOf<Uint64>();
-    try {
-      final result = sysctl(name, value.cast(), size, nullptr, 0);
-      return result == 0 && value.value > 0 ? value.value : null;
-    } finally {
-      calloc
-        ..free(name)
-        ..free(value)
-        ..free(size);
+  /// Typical hardware of an Apple model identifier such as `iPhone18,1`
+  /// (used for simulators, which report the host Mac's hardware).
+  static SwipeDeviceProfile forAppleModel(String identifier) {
+    final match = RegExp(r'^(iPhone|iPad|iPod)(\d+),').firstMatch(identifier);
+    if (match == null) {
+      return const SwipeDeviceProfile(totalRamBytes: 4 * _gb, cpuCores: 6);
     }
+    final family = match.group(1)!;
+    final major = int.parse(match.group(2)!);
+    if (family == 'iPad') {
+      // iPad13+ (M1 and later) ship with 8 GB or more.
+      return SwipeDeviceProfile(
+        totalRamBytes: (major >= 13 ? 8 : 4) * _gb,
+        cpuCores: major >= 13 ? 8 : 6,
+      );
+    }
+    if (family == 'iPod') {
+      return const SwipeDeviceProfile(totalRamBytes: 2 * _gb, cpuCores: 2);
+    }
+    final ramGb = switch (major) {
+      < 10 => 2, // iPhone 7 and older
+      10 => 2, // 8 / X
+      11 => 3, // XS / XR
+      12 || 13 || 14 => 4, // 11, 12, 13, 14
+      15 => 6, // 14 Pro, 15
+      _ => 8, // 15 Pro and newer
+    };
+    return SwipeDeviceProfile(
+      totalRamBytes: ramGb * _gb,
+      cpuCores: major >= 10 ? 6 : 2,
+    );
   }
 
   @override

@@ -152,7 +152,7 @@ void main() {
     test('keeps at most maxCachedVideos, evicting least recently watched',
         () async {
       await start(SwipeCacheConfig(
-          directory: dir, chunkSize: 64 * 1024, maxCachedVideos: 2));
+          directoryPath: dir.path, chunkSize: 64 * 1024, maxCachedVideos: 2));
       for (var i = 0; i < 4; i++) {
         origin.addRandom('c$i.mp4', 100 * 1024, seed: i);
         await fetch(cache.playableUri(origin.url('c$i.mp4')));
@@ -170,7 +170,7 @@ void main() {
 
     test('expires videos after maxAge while the app is running', () async {
       await start(SwipeCacheConfig(
-        directory: dir,
+        directoryPath: dir.path,
         chunkSize: 64 * 1024,
         maxAge: const Duration(milliseconds: 400),
         sweepInterval: const Duration(milliseconds: 100),
@@ -193,7 +193,7 @@ void main() {
 
     test('closes idle file handles (no descriptor exhaustion)', () async {
       await start(SwipeCacheConfig(
-        directory: dir,
+        directoryPath: dir.path,
         chunkSize: 64 * 1024,
         sweepInterval: const Duration(milliseconds: 100),
       ));
@@ -211,7 +211,7 @@ void main() {
 
     test('respects the byte budget', () async {
       await start(SwipeCacheConfig(
-          directory: dir, chunkSize: 64 * 1024, maxCacheBytes: 500 * 1024));
+          directoryPath: dir.path, chunkSize: 64 * 1024, maxCacheBytes: 500 * 1024));
       for (var i = 0; i < 5; i++) {
         origin.addRandom('b$i.mp4', 200 * 1024, seed: i);
         await fetch(cache.playableUri(origin.url('b$i.mp4')));
@@ -221,11 +221,13 @@ void main() {
     });
 
     test('clear() removes everything not in use', () async {
-      await start(SwipeCacheConfig(directory: dir, chunkSize: 64 * 1024));
+      await start(SwipeCacheConfig(directoryPath: dir.path, chunkSize: 64 * 1024));
       for (var i = 0; i < 3; i++) {
         origin.addRandom('x$i.mp4', 100 * 1024, seed: i);
         await fetch(cache.playableUri(origin.url('x$i.mp4')));
       }
+      // Let the proxy finish its requests (videos being served are kept).
+      await Future<void>.delayed(const Duration(milliseconds: 200));
       await cache.clear();
       expect(cache.stats.diskBytes, 0);
       expect(cache.stats.cachedVideos, 0);
@@ -235,7 +237,7 @@ void main() {
     for (final limit in [1, 3]) {
       test('never exceeds $limit parallel background downloads', () async {
         await start(SwipeCacheConfig(
-          directory: dir,
+          directoryPath: dir.path,
           chunkSize: 64 * 1024,
           maxConcurrentDownloads: limit,
         ));
@@ -258,7 +260,7 @@ void main() {
 
     test('stats expose the limits in force', () async {
       await start(SwipeCacheConfig(
-          directory: dir, maxCachedVideos: 9, deviceProfile: low));
+          directoryPath: dir.path, maxCachedVideos: 9, deviceProfile: low));
       final limits = cache.stats.limits;
       expect(limits.maxCachedVideos, 9);
       expect(limits.device, SwipeDeviceTier.low);

@@ -31,3 +31,31 @@
   file descriptor exhaustion in long sessions), empty entries dropped,
   disk-full handling, no orphaned files after eviction.
 * Thumbnails decoded at screen resolution.
+* HLS and DASH caching: playlists/manifests are rewritten so every segment
+  goes through the proxy. VOD streams are stored (and replay offline), live
+  streams pass through without being stored, encryption keys are never
+  stored. All resources of a stream count and are evicted as one video.
+* HLS prefetch: playlist, start variant (first listed on iOS/macOS, by
+  bandwidth on Android), its default audio rendition, init section and first
+  segments.
+* `SwipeSource.formatHint` / `PrefetchRequest.formatHint` for stream URLs
+  without a `.m3u8`/`.mpd` extension; the player passes the format to
+  ExoPlayer.
+* Origins without Range support are downloaded once: bytes before a seek
+  position are stored instead of discarded, and requests read through in one
+  pass instead of restarting every few chunks.
+* iOS simulator: automatic limits use the simulated model's hardware instead
+  of the host Mac's (`SwipeDeviceProfile.forAppleModel`).
+* Web support: the package compiles for the web and plays directly (no disk
+  cache); falls back to muted playback when the browser blocks autoplay with
+  sound.
+* Breaking: `SwipeCacheConfig.directory` (a `Directory`) is now
+  `directoryPath` (a `String`), keeping the public API free of `dart:io`.
+  `bypassExtensions` is empty by default (HLS/DASH are cached).
+* Origins that repeat a response header (e.g. `Accept-Ranges` twice) no
+  longer break pass-through and cached responses.
+* Live streams behind a master playlist store nothing (the master playlist
+  is dropped once a live variant is seen).
+* Segment file handles are released as soon as a segment has been served.
+* Verbose logging (`SwipeLogLevel.verbose`) prints one line per proxy request
+  with range, time and bytes from disk / network.

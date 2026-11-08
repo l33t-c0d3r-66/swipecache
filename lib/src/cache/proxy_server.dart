@@ -1,12 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../stream/stream_loader.dart';
+import '../stream/stream_manifest.dart';
 import '../util/http_range.dart';
 import '../util/logger.dart';
 import 'cache_config.dart';
 import 'cache_entry.dart';
 import 'cache_store.dart';
+import 'origin_client.dart';
 
 /// Counters describing what the proxy served to players.
 class ProxyCounters {
@@ -23,10 +27,12 @@ class ProxyCounters {
 /// and stored at the same time. This gives instant start on a cache miss
 /// (unlike "download then play" caches) and free replays/seek-backs.
 class ProxyServer {
-  ProxyServer(this.store, this.config);
+  ProxyServer(this.store, this.config, this.client, this.streams);
 
   final CacheStore store;
   final SwipeCacheConfig config;
+  final OriginClient client;
+  final StreamLoader streams;
   final ProxyCounters counters = ProxyCounters();
 
   HttpServer? _server;
@@ -48,7 +54,12 @@ class ProxyServer {
     _server = server;
     _port = server.port;
     _subscription = server.listen(
-      (request) => unawaited(_handle(request)),
+      (request) => unawaited(_logged(request).catchError((Object error,
+          StackTrace stack) {
+        counters.errors++;
+        SwipeLog.e('Proxy request failed: ${request.uri}', '$error\n$stack');
+        return _reject(request.response, HttpStatus.internalServerError);
+      })),
       onError: (Object error) => SwipeLog.e('Proxy server error', error),
     );
     SwipeLog.i('Proxy listening on 127.0.0.1:$_port');
@@ -68,22 +79,194 @@ class ProxyServer {
     );
   }
 
+  static const _modeLetters = {
+    ProxyMode.cache: 'c',
+    ProxyMode.passthrough: 'n',
+    ProxyMode.manifest: 'm',
+  };
+
+  static final _absoluteUrl =
+      RegExp(r'^(https?)://([^/?#]+)([^#]*)', caseSensitive: false);
+
+  /// Proxy URL for a resource of the stream [group].
+  ///
+  /// The origin scheme, host and path are mirrored into the proxy path
+  /// (`/s/<group>/<mode>/<scheme>/<host>/<path>`), so URLs a player resolves
+  /// relative to a manifest still point at the proxy.
+  String streamUrl(String group, ProxyMode mode, String absolute) {
+    final m = _absoluteUrl.firstMatch(absolute);
+    if (m == null) return absolute;
+    var rest = m.group(3)!;
+    if (!rest.startsWith('/')) rest = '/$rest';
+    return 'http://${InternetAddress.loopbackIPv4.address}:$port/s/$group/'
+        '${_modeLetters[mode]}/${m.group(1)!.toLowerCase()}/${m.group(2)}$rest';
+  }
+
+  /// [_handle] with a verbose log line per request (path, range, time,
+  /// bytes from disk / network).
+  Future<void> _logged(HttpRequest request) async {
+    if (SwipeLog.level != SwipeLogLevel.verbose) return _handle(request);
+    final stopwatch = Stopwatch()..start();
+    final disk = counters.bytesFromCache;
+    final net = counters.bytesFromNetwork;
+    try {
+      await _handle(request);
+    } finally {
+      final name = request.uri.pathSegments.isEmpty
+          ? '/'
+          : request.uri.pathSegments.last;
+      SwipeLog.v('${request.method} $name '
+          '${request.headers.value(HttpHeaders.rangeHeader) ?? ''} -> '
+          '${request.response.statusCode} in ${stopwatch.elapsedMilliseconds}ms '
+          '(disk ${counters.bytesFromCache - disk}, '
+          'net ${counters.bytesFromNetwork - net})');
+    }
+  }
+
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
     counters.requests++;
-    final segments = request.uri.pathSegments;
-    if (segments.length != 2 || segments.first != 'v') {
-      return _reject(response, HttpStatus.notFound);
-    }
     if (request.method != 'GET' && request.method != 'HEAD') {
       return _reject(response, HttpStatus.methodNotAllowed);
+    }
+    final segments = request.uri.pathSegments;
+    if (segments.length >= 5 && segments.first == 's') {
+      return _handleStream(request);
+    }
+    if (segments.length != 2 || segments.first != 'v') {
+      return _reject(response, HttpStatus.notFound);
     }
     final name = segments[1];
     final dot = name.indexOf('.');
     final key = dot < 0 ? name : name.substring(0, dot);
     final entry = store.byKey(key);
     if (entry == null) return _reject(response, HttpStatus.notFound);
+    return _serveEntry(request, entry);
+  }
 
+  Future<void> _handleStream(HttpRequest request) async {
+    final response = request.response;
+    // Work on the raw (still percent-encoded) path so it is mirrored exactly.
+    final parts = request.uri.path.split('/');
+    if (parts.length < 6) return _reject(response, HttpStatus.notFound);
+    final group = parts[2];
+    final mode = parts[3];
+    final rest = '/${parts.sublist(6).join('/')}';
+    final query = request.uri.hasQuery ? '?${request.uri.query}' : '';
+    final Uri origin;
+    try {
+      origin = Uri.parse('${parts[4]}://${parts[5]}$rest$query');
+    } on FormatException {
+      return _reject(response, HttpStatus.badRequest);
+    }
+    switch (mode) {
+      case 'm':
+        return _serveManifest(request, origin, group);
+      case 'n':
+        return _passthrough(request, origin, group);
+      case 'c':
+        if (streamKindFor(origin) != null) {
+          return _serveManifest(request, origin, group);
+        }
+        final entry = store.obtain(origin,
+            headers: streams.headersFor(group), group: group);
+        return _serveEntry(request, entry);
+      default:
+        return _reject(response, HttpStatus.notFound);
+    }
+  }
+
+  /// Serves an HLS playlist / DASH manifest rewritten to point at the proxy.
+  Future<void> _serveManifest(
+      HttpRequest request, Uri origin, String group) async {
+    final response = request.response;
+    final LoadedManifest manifest;
+    try {
+      manifest = await streams.load(origin, group);
+    } catch (error) {
+      counters.errors++;
+      SwipeLog.e('Manifest failed for $origin', error);
+      final status = error is HttpException &&
+              error.message.startsWith('Status ')
+          ? int.tryParse(error.message.substring(7)) ?? HttpStatus.badGateway
+          : HttpStatus.badGateway;
+      return _reject(response, status);
+    }
+    String proxy(String url, ProxyMode mode) => streamUrl(group, mode, url);
+    final body = switch (manifest.kind) {
+      StreamKind.hls => rewriteHls(manifest.body, manifest.base, proxy),
+      StreamKind.dash => rewriteDash(manifest.body, manifest.base, proxy),
+    };
+    final bytes = utf8.encode(body);
+    if (manifest.fromCache) {
+      counters.bytesFromCache += bytes.length;
+    } else {
+      counters.bytesFromNetwork += bytes.length;
+    }
+    try {
+      response.statusCode = HttpStatus.ok;
+      response.headers
+        ..set(HttpHeaders.contentTypeHeader, manifestContentType(manifest.kind))
+        ..set(HttpHeaders.cacheControlHeader, 'no-store');
+      response.contentLength = bytes.length;
+      if (request.method != 'HEAD') response.add(bytes);
+      await response.close();
+    } catch (_) {
+      // Player went away.
+    }
+  }
+
+  /// Streams a resource from the origin without storing it (live segments,
+  /// encryption keys).
+  Future<void> _passthrough(
+      HttpRequest request, Uri origin, String group) async {
+    final response = request.response;
+    OriginResponse upstream;
+    try {
+      upstream = await client.send(origin, streams.headersFor(group),
+          range: request.headers.value(HttpHeaders.rangeHeader));
+    } catch (error) {
+      counters.errors++;
+      SwipeLog.e('Pass-through failed for $origin', error);
+      return _reject(response, HttpStatus.badGateway);
+    }
+    try {
+      response.statusCode = upstream.statusCode;
+      for (final name in const [
+        HttpHeaders.contentTypeHeader,
+        HttpHeaders.contentRangeHeader,
+        HttpHeaders.acceptRangesHeader,
+      ]) {
+        final value = upstream.header(name);
+        if (value != null) response.headers.set(name, value);
+      }
+      response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+      if (upstream.contentLength >= 0) {
+        response.contentLength = upstream.contentLength;
+      }
+      if (request.method == 'HEAD') {
+        upstream.detach();
+      } else {
+        await response.addStream(upstream.stream.map((data) {
+          counters.bytesFromNetwork += data.length;
+          client.networkBytes += data.length;
+          return data;
+        }));
+      }
+      await response.close();
+    } catch (error) {
+      upstream.detach();
+      // Player went away or origin failed mid-stream: never leave the
+      // response open (the player would wait for it forever).
+      SwipeLog.v('Pass-through ended early for $origin: $error');
+      try {
+        await response.close();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _serveEntry(HttpRequest request, CacheEntry entry) async {
+    final response = request.response;
     entry.pins++;
     entry.touch();
     Socket? socket;
@@ -96,6 +279,12 @@ class ProxyServer {
       } on OriginException catch (error) {
         SwipeLog.e('Probe failed for ${entry.url}', error);
         await _reject(response, error.statusCode ?? HttpStatus.badGateway);
+        return;
+      }
+      if (streamKindFor(entry.url, contentType: entry.contentType) != null) {
+        // A playlist behind a URL without .m3u8/.mpd: rewrite it.
+        await _serveManifest(
+            request, entry.url, entry.group ?? entry.key);
         return;
       }
       final total = entry.totalLength!;
@@ -175,6 +364,11 @@ class ProxyServer {
       socket?.destroy();
       entry.pins--;
       entry.touch();
+      // Stream segments are read once in a row: release the file handle now
+      // instead of at the next sweep (iOS allows 256 open files).
+      if (entry.group != null && entry.pins == 0) {
+        unawaited(entry.closeIdleFile());
+      }
     }
   }
 
@@ -273,11 +467,17 @@ class ProxyServer {
 
       // Claim a run of missing chunks and fetch them in one origin request.
       var runEnd = chunk;
-      while (runEnd < lastChunk &&
-          runEnd - chunk + 1 < config.maxRunChunks &&
-          !entry.hasChunk(runEnd + 1) &&
-          !entry.isInflight(runEnd + 1)) {
-        runEnd++;
+      if (entry.rangesUnsupported) {
+        // Every request restarts at byte 0 on such servers: read through to
+        // the end of the request in one go instead of in short runs.
+        runEnd = lastChunk;
+      } else {
+        while (runEnd < lastChunk &&
+            runEnd - chunk + 1 < config.maxRunChunks &&
+            !entry.hasChunk(runEnd + 1) &&
+            !entry.isInflight(runEnd + 1)) {
+          runEnd++;
+        }
       }
       final before = pos;
       await entry.fetchRun(

@@ -18,7 +18,7 @@ void main() {
     cache = SwipeCache.custom();
     await cache.init(
       config: SwipeCacheConfig(
-        directory: dir,
+        directoryPath: dir.path,
         chunkSize: chunk,
         maxRunChunks: 32,
       ),

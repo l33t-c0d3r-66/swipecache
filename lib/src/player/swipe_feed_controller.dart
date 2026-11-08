@@ -3,7 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 
-import '../cache/prefetcher.dart';
+import '../cache/prefetch_request.dart';
 import '../cache/swipe_cache.dart';
 import '../device/adaptive_policy.dart';
 import 'swipe_feed_config.dart';
@@ -312,6 +312,9 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
           cache: _cache,
           config: config,
           muted: _muted,
+          onAutoplayBlocked: () {
+            if (!_muted && !_disposed) setMuted(true);
+          },
         ),
       );
       if (i == _index) {
@@ -348,7 +351,10 @@ class SwipeFeedController extends ChangeNotifier with WidgetsBindingObserver {
       final uri = Uri.tryParse(source.url);
       if (uri == null || !uri.hasScheme || uri.scheme == 'file') return;
       requests.add(PrefetchRequest(uri,
-          headers: source.headers, headBytes: headBytes, priority: priority++));
+          headers: source.headers,
+          headBytes: headBytes,
+          priority: priority++,
+          formatHint: source.formatHint));
     }
 
     for (var i = 1; i <= count; i++) {

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:video_player/video_player.dart' show VideoFormat;
 
 /// One item of a feed.
 @immutable
@@ -9,13 +10,15 @@ class SwipeSource {
     this.thumbnailUrl,
     this.headers,
     this.data,
+    this.formatHint,
   });
 
   /// Stable identifier (e.g. the reel id). Used to keep players across list
   /// updates.
   final String id;
 
-  /// Remote (http/https) or `file://` video URL.
+  /// Remote (http/https) video file, HLS playlist (`.m3u8`), DASH manifest
+  /// (`.mpd`) or `file://` URL.
   final String url;
 
   final String? thumbnailUrl;
@@ -25,6 +28,10 @@ class SwipeSource {
 
   /// Arbitrary payload, e.g. your own model object.
   final Object? data;
+
+  /// Set to [VideoFormat.hls] or [VideoFormat.dash] for streams whose URL
+  /// does not end in `.m3u8` / `.mpd`. Detected automatically otherwise.
+  final VideoFormat? formatHint;
 
   @override
   bool operator ==(Object other) =>

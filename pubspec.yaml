@@ -12,6 +12,7 @@ topics:
   - reels
   - video-player
   - feed
+  - hls
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -21,6 +22,7 @@ platforms:
   android:
   ios:
   macos:
+  web:
 
 dependencies:
   flutter:

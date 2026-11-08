@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import '../device/device_profile.dart';
 
 /// Builds the identity of a cached resource from its URL. Override it to drop
@@ -29,11 +27,12 @@ class SwipeCacheConfig {
     this.connectTimeout = const Duration(seconds: 10),
     this.idleTimeout = const Duration(seconds: 20),
     this.sweepInterval = const Duration(seconds: 30),
-    this.directory,
+    this.directoryPath,
     this.deviceProfile,
     this.cacheKeyBuilder = defaultCacheKeyBuilder,
     this.userAgent = 'swipecache',
-    this.bypassExtensions = const {'m3u8', 'mpd'},
+    this.bypassExtensions = const {},
+    this.maxManifestBytes = 8 * 1024 * 1024,
   })  : assert(maxCacheBytes == null || maxCacheBytes > 0),
         assert(maxCachedVideos == null || maxCachedVideos > 0),
         assert(maxConcurrentDownloads == null || maxConcurrentDownloads > 0),
@@ -79,8 +78,9 @@ class SwipeCacheConfig {
   /// How often expired videos are removed and idle file handles closed.
   final Duration sweepInterval;
 
-  /// Cache directory. Defaults to `<temporary dir>/swipecache`.
-  final Directory? directory;
+  /// Absolute path of the cache directory. Defaults to
+  /// `<temporary dir>/swipecache`.
+  final String? directoryPath;
 
   /// Overrides device detection for automatic limits (useful for tests or
   /// to force a tier).
@@ -89,7 +89,12 @@ class SwipeCacheConfig {
   final SwipeCacheKeyBuilder cacheKeyBuilder;
   final String userAgent;
 
-  /// Streaming formats with relative sub-resources (HLS/DASH) are not proxied
-  /// and play directly from the network.
+  /// File extensions (without the dot, lower case) that are never cached and
+  /// play straight from the network, e.g. `{'m3u8'}` to opt HLS out.
+  /// HLS (`.m3u8`) and DASH (`.mpd`) are cached by default.
   final Set<String> bypassExtensions;
+
+  /// Largest HLS playlist / DASH manifest accepted (protects memory against
+  /// a misbehaving server).
+  final int maxManifestBytes;
 }

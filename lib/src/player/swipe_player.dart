@@ -1,11 +1,12 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:video_player/video_player.dart';
 
 import '../cache/swipe_cache.dart';
 import '../util/logger.dart';
+import 'file_controller_stub.dart'
+    if (dart.library.io) 'file_controller_io.dart';
 import 'swipe_feed_config.dart';
 import 'swipe_source.dart';
 
@@ -23,11 +24,16 @@ class SwipePlayer extends ChangeNotifier {
     required SwipeCache cache,
     required SwipeFeedConfig config,
     bool muted = false,
+    this.onAutoplayBlocked,
   })  : _cache = cache,
         _config = config,
         _muted = muted;
 
   final SwipeSource source;
+
+  /// Called when a browser refused to autoplay with sound and the player
+  /// fell back to muted playback (web only).
+  final VoidCallback? onAutoplayBlocked;
   final SwipeCache _cache;
   final SwipeFeedConfig _config;
 
@@ -170,20 +176,38 @@ class SwipePlayer extends ChangeNotifier {
       allowBackgroundPlayback: true,
     );
     final url = source.url;
-    if (url.startsWith('file://') || url.startsWith('/')) {
+    if (!kIsWeb && (url.startsWith('file://') || url.startsWith('/'))) {
       _servedByCache = false;
       final path = url.startsWith('file://') ? Uri.parse(url).toFilePath() : url;
-      return VideoPlayerController.file(File(path), videoPlayerOptions: options);
+      return fileController(path, options);
     }
     final uri = bypassCache
         ? Uri.parse(url)
-        : _cache.playableUri(url, headers: source.headers);
-    _servedByCache = uri.host == InternetAddress.loopbackIPv4.address;
+        : _cache.playableUri(url,
+            headers: source.headers, formatHint: source.formatHint);
+    _servedByCache = uri.host == '127.0.0.1';
     return VideoPlayerController.networkUrl(
       uri,
+      formatHint: source.formatHint ?? _formatFromUrl(url),
       httpHeaders: _servedByCache ? const {} : (source.headers ?? const {}),
       videoPlayerOptions: options,
     );
+  }
+
+  /// Proxy URLs keep the extension, but tell ExoPlayer explicitly so a
+  /// stream is never mistaken for a progressive file.
+  static VideoFormat? _formatFromUrl(String url) {
+    final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    if (path.endsWith('.m3u8')) return VideoFormat.hls;
+    if (path.endsWith('.mpd')) return VideoFormat.dash;
+    return null;
+  }
+
+  static bool _isAutoplayBlock(Object? error) {
+    final text = '$error'.toLowerCase();
+    return text.contains('notallowed') ||
+        text.contains("didn't interact") ||
+        text.contains('user gesture');
   }
 
   void _onValue() {
@@ -209,6 +233,14 @@ class SwipePlayer extends ChangeNotifier {
   /// the decoder at the same position (bypassing the cache on the second
   /// try) before surfacing an error.
   void _onRuntimeError(Object? error, Duration position) {
+    if (kIsWeb && !_muted && _isAutoplayBlock(error)) {
+      // Browsers only autoplay muted until the user interacts with the page.
+      SwipeLog.i('Autoplay with sound blocked by the browser; muting');
+      _muted = true;
+      onAutoplayBlocked?.call();
+      _restart(position);
+      return;
+    }
     _error = error;
     if (_recoveries >= 2) {
       _setStatus(SwipePlayerStatus.error);

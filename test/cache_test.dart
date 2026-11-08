@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:swipecache/swipecache.dart';
+import 'package:video_player/video_player.dart' show VideoFormat;
 
 import 'test_origin.dart';
 
@@ -14,7 +15,7 @@ void main() {
   late SwipeCache cache;
 
   SwipeCacheConfig config({int maxBytes = 64 * 1024 * 1024}) => SwipeCacheConfig(
-        directory: dir,
+        directoryPath: dir.path,
         chunkSize: chunk,
         maxRunChunks: 4,
         maxCacheBytes: maxBytes,
@@ -89,6 +90,25 @@ void main() {
     expect(full, data);
   });
 
+  test('origins without Range support are downloaded once, not per seek',
+      () async {
+    origin.supportRanges = false;
+    final data = origin.addRandom('nr.mp4', 40 * chunk);
+    final url = origin.url('nr.mp4');
+    final uri = cache.playableUri(url);
+    // Seek far into the file: the bytes before it are stored, not discarded.
+    final (status, tail, _) = await fetch(uri, range: 'bytes=${30 * chunk}-');
+    expect(status, 206);
+    expect(tail, data.sublist(30 * chunk));
+    await eventually(() => cache.isCached(url));
+    // Probe + one pass over the file; short runs would restart at byte 0
+    // every 4 chunks (10+ requests).
+    expect(origin.requests, 2);
+    final (_, full, _) = await fetch(uri);
+    expect(full, data);
+    expect(origin.requests, 2, reason: 'served entirely from disk');
+  });
+
   test('concurrent readers share downloads', () async {
     origin
       ..delayPerPacket = const Duration(milliseconds: 2)
@@ -120,6 +140,25 @@ void main() {
 
     final (_, full, _) = await fetch(uri);
     expect(full, data);
+  });
+
+  test('origins without Range support are downloaded once, not per seek',
+      () async {
+    origin.supportRanges = false;
+    final data = origin.addRandom('nr.mp4', 40 * chunk);
+    final url = origin.url('nr.mp4');
+    final uri = cache.playableUri(url);
+    // Seek far into the file: the bytes before it are stored, not discarded.
+    final (status, tail, _) = await fetch(uri, range: 'bytes=${30 * chunk}-');
+    expect(status, 206);
+    expect(tail, data.sublist(30 * chunk));
+    await eventually(() => cache.isCached(url));
+    // Probe + one pass over the file; short runs would restart at byte 0
+    // every 4 chunks (10+ requests).
+    expect(origin.requests, 2);
+    final (_, full, _) = await fetch(uri);
+    expect(full, data);
+    expect(origin.requests, 2, reason: 'served entirely from disk');
   });
 
   test('prefetch downloads only the head', () async {
@@ -213,9 +252,14 @@ void main() {
     expect(cache.isCached(origin.url('q1.mp4')), isTrue);
   });
 
-  test('HLS and unknown schemes bypass the proxy', () {
-    expect(cache.playableUri('https://cdn/x/master.m3u8').host, 'cdn');
+  test('HLS is proxied; unknown schemes and Smooth Streaming bypass it', () {
+    expect(cache.playableUri('https://cdn/x/master.m3u8').host, '127.0.0.1');
     expect(cache.playableUri('file:///tmp/a.mp4').scheme, 'file');
+    expect(
+        cache
+            .playableUri('https://cdn/x/Manifest', formatHint: VideoFormat.ss)
+            .host,
+        'cdn');
   });
 
   test('falls back to origin URL when not initialised', () {

@@ -71,6 +71,8 @@ these two approaches. Both have real problems:
 | **Plays while it saves** | Videos start as fast as normal streaming. While a video plays, it is saved on the phone at the same time, so watching it again uses no data. |
 | **Saves only what is needed** | If a user watches half a video, only that half is saved. Nothing is downloaded twice. |
 | **Loads the next videos early** | The next video is ready before the user swipes, so swiping feels instant. Only the first part of upcoming videos is downloaded, not the whole file. |
+| **HLS and DASH too** | Streaming playlists (`.m3u8`, `.mpd`) are saved just like normal video files: every piece of the video is kept, so watching again is instant and works offline. Live streams play normally and are never saved. |
+| **Works with any server** | Even servers that can only send a whole file at once are handled: the file is downloaded once and kept, never downloaded again for each jump in the video. |
 | **Smart about slow-starting files** | Some MP4 files (common for user uploads) can't start until the end of the file is loaded. swipecache detects these and loads the right part early. |
 | **One sound at a time** | Exactly one video plays. Sound stops when the user swipes away, leaves the screen or puts the app in the background. |
 | **No "disposed" crashes** | Video players are created and destroyed safely, no matter how fast the user swipes. |
@@ -97,8 +99,9 @@ Then run:
 flutter pub get
 ```
 
-Requirements: Flutter 3.22 or newer. Works on **Android**, **iOS** and
-**macOS**.
+Requirements: Flutter 3.22 or newer. Works on **Android**, **iOS**, **macOS**
+and **web** (on the web videos play normally but are not saved — see
+[Limitations](#limitations)).
 
 ### 2. Allow local video playback (one-time setup)
 
@@ -359,6 +362,30 @@ controller.setSources(list); // replace the whole list (e.g. pull-to-refresh)
 `bufferingBuilder`, `emptyBuilder`, `onRefresh` (pull-to-refresh) and
 `showProgress` (a thin progress bar) to customise the look.
 
+#### Streaming videos (HLS and DASH)
+
+Nothing to do: addresses ending in `.m3u8` (HLS) or `.mpd` (DASH) are
+recognised and saved automatically. If your stream address has no such ending,
+tell swipecache what it is:
+
+```dart
+SwipeSource(
+  id: 'live-42',
+  url: 'https://example.com/play?id=42', // an HLS playlist
+  formatHint: VideoFormat.hls, // from package:video_player
+)
+```
+
+What happens behind the scenes:
+
+- Normal (on-demand) streams are saved piece by piece while they play. All
+  pieces of one stream count as **one video** for your limits and are deleted
+  together.
+- Before a stream is shown, its playlist and first pieces are loaded early,
+  for the same quality the player will start with.
+- Live streams always load the newest playlist and are never saved.
+- Encryption keys of protected streams are never saved on the phone.
+
 ### Using only the cache
 
 Already have your own video player screen? You can use just the caching part
@@ -414,30 +441,47 @@ print(SwipeCache.instance.stats);    // hit ratio, storage used, downloads, limi
 
 ## Limitations
 
-- **HLS and DASH streams** (`.m3u8` and `.mpd` addresses) play normally but are
-  **not saved** yet. Regular video files (MP4, MOV, M4V) are fully supported.
-- **Flutter web is not supported.** Browsers don't allow the local address
-  swipecache uses.
-- **Live streams** are not cached.
-- **The server must support partial downloads** ("range requests") for the best
-  results. Almost every video host and CDN does. If a server doesn't, videos
-  still play and are saved, but jumping to the middle of a video downloads it
-  from the start.
-- **iOS simulator:** the simulator reports your Mac's memory and processor, so
-  automatic settings behave like a high-end phone there. Real iPhones report
-  their own hardware.
+- **DASH does not play on iOS.** Apple's video player only supports HLS, so
+  this is true for every Flutter video package. Serve HLS to iPhones (most
+  video platforms provide both).
+- **On the web, videos are not saved.** Browsers don't allow the trick
+  swipecache uses to save videos, so they play directly from the internet (the
+  browser's own cache still helps). Browsers also block sound until the user
+  taps the page; swipecache then starts the video muted instead of failing.
+- **Live streams are not saved**, on purpose: a live video is watched once.
+- **Protected streams need the internet to replay.** The video pieces are
+  saved, but the decryption key is fetched again each time, for safety. DRM
+  systems (FairPlay, Widevine) are not supported by Flutter's video player.
+- **Smooth Streaming** (`VideoFormat.ss`) plays normally but is not saved.
+- **HLS early loading makes a guess.** swipecache loads the start of the
+  quality the player is expected to pick. On Android the player may choose a
+  different quality on a very fast or slow connection; then the first second
+  of that quality is downloaded during playback instead. For DASH, only the
+  manifest is loaded early; the video itself is saved while it plays.
+- **Servers without partial downloads** ("range requests"): videos play and
+  are downloaded only once, but jumping far ahead in a video that is not
+  saved yet waits until the download reaches that point.
 
 ---
 
 ## Example app
 
-The [`example`](example) folder contains a complete demo app: a feed of 35
-public test videos with sound, paging, mute and clear-cache buttons, and a live
+The [`example`](example) folder contains a complete demo app: a feed of
+public test videos with sound (HLS, live HLS, DASH and MP4), paging, mute and clear-cache buttons, and a live
 panel showing cache statistics and the limits in use.
 
 ```sh
 cd example
 flutter run
+```
+
+It also has a device test that plays every stream type (HLS, live HLS, DASH,
+MP4) on the real phone player and checks that videos are saved and replayed
+from the cache:
+
+```sh
+cd example
+flutter test integration_test/streams_test.dart
 ```
 
 ## License

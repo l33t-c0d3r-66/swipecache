@@ -1,31 +1,18 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:video_player/video_player.dart' show VideoFormat;
+
 import '../device/adaptive_policy.dart';
+import '../stream/stream_loader.dart';
+import '../stream/stream_manifest.dart';
 import '../util/logger.dart';
 import '../util/mp4_inspector.dart';
 import 'cache_config.dart';
 import 'cache_entry.dart';
 import 'cache_store.dart';
-
-/// A request to warm the cache for one video.
-class PrefetchRequest {
-  const PrefetchRequest(
-    this.url, {
-    this.headers,
-    this.headBytes,
-    this.priority = 0,
-  });
-
-  final Uri url;
-  final Map<String, String>? headers;
-
-  /// Bytes from the start of the file to cache. `null` uses the default.
-  final int? headBytes;
-
-  /// Lower runs first.
-  final int priority;
-}
+import 'prefetch_request.dart';
 
 class _Task {
   _Task(this.key, this.request);
@@ -41,10 +28,14 @@ class _Task {
 /// user swipes past. For MP4 files whose `moov` atom sits at the end, the
 /// tail is fetched as well, since players need it before the first frame.
 class Prefetcher {
-  Prefetcher(this.store, this.config, this.policy);
+  Prefetcher(this.store, this.config, this.policy, this.streams,
+      {required double? Function() bandwidth})
+      : _bandwidth = bandwidth;
 
   final CacheStore store;
   final SwipeCacheConfig config;
+  final StreamLoader streams;
+  final double? Function() _bandwidth;
 
   /// Supplies the concurrency limit (fixed, or automatic from bandwidth and
   /// device class – re-read on every scheduling decision).
@@ -117,6 +108,12 @@ class Prefetcher {
 
   Future<void> _run(_Task task) async {
     final request = task.request;
+    final hint = request.formatHint;
+    if (hint == VideoFormat.hls ||
+        hint == VideoFormat.dash ||
+        streamKindFor(request.url) != null) {
+      return _runStream(task);
+    }
     final entry = store.obtain(request.url, headers: request.headers);
     // Pinned while downloading so eviction cannot delete it under us.
     entry.pins++;
@@ -131,7 +128,10 @@ class Prefetcher {
       if (task.cancelled) return;
 
       // Non fast-start MP4: the player reads the moov atom at the end first.
-      if (entry.hasChunk(0) && config.maxTailPrefetchBytes > 0) {
+      // (Not on servers without Range support: that means the whole file.)
+      if (entry.hasChunk(0) &&
+          !entry.rangesUnsupported &&
+          config.maxTailPrefetchBytes > 0) {
         final head = await entry.read(0, entry.chunkEnd(0));
         final layout = inspectMp4Head(head, totalLength: total);
         final moov = layout.moovOffset;
@@ -148,6 +148,86 @@ class Prefetcher {
       SwipeLog.v('Prefetch failed for ${request.url}: $error');
     } finally {
       entry.pins--;
+    }
+  }
+
+  /// HLS: the playlist(s), then the init section and the first segments of
+  /// the variant the player will start with, plus its default audio
+  /// rendition. DASH: the manifest (segments are cached while playing).
+  Future<void> _runStream(_Task task) async {
+    final request = task.request;
+    final group = store.keyFor(request.url);
+    streams.registerHeaders(group, request.headers);
+    final before = store.groupBytes(group);
+    try {
+      final top = await streams.load(request.url, group, foreground: false);
+      if (task.cancelled || top.kind != StreamKind.hls) return;
+      var media = HlsPlaylist.parse(top.body, top.base);
+      HlsPlaylist? audio;
+      if (media.isMaster) {
+        final master = media;
+        final variant = master.startVariant(
+          firstListed: Platform.isIOS || Platform.isMacOS,
+          bitsPerSecond: _bandwidth(),
+        );
+        if (variant == null) return;
+        final loaded =
+            await streams.load(variant.uri, group, foreground: false);
+        if (task.cancelled) return;
+        media = HlsPlaylist.parse(loaded.body, loaded.base);
+        final audioUri = master.defaultAudio[variant.audioGroup];
+        if (audioUri != null) {
+          final a = await streams.load(audioUri, group, foreground: false);
+          audio = HlsPlaylist.parse(a.body, a.base);
+        }
+      }
+      // Live: segments are short-lived and never stored.
+      if (!media.isStatic || task.cancelled) return;
+      final budget = request.headBytes ?? config.defaultPrefetchBytes;
+      await _prefetchSegments(media, group, budget, task);
+      if (audio != null && audio.isStatic && !task.cancelled) {
+        await _prefetchSegments(audio, group, budget ~/ 4, task);
+      }
+    } catch (error) {
+      SwipeLog.v('Stream prefetch failed for ${request.url}: $error');
+    } finally {
+      if (store.groupBytes(group) > before) completed++;
+    }
+  }
+
+  Future<void> _prefetchSegments(
+      HlsPlaylist playlist, String group, int budget, _Task task) async {
+    var fetched = 0;
+    var segments = 0;
+    final resources = [
+      if (playlist.initSection case final init?) (init, false),
+      for (final segment in playlist.segments) (segment, true),
+    ];
+    for (final (resource, isSegment) in resources) {
+      if (task.cancelled) return;
+      if (isSegment && segments > 0 && fetched >= budget) return;
+      final entry = store.obtain(resource.uri,
+          headers: streams.headersFor(group), group: group);
+      entry.pins++;
+      try {
+        await entry.ensureProbed();
+        final total = entry.totalLength!;
+        if (total == 0) continue;
+        final start = math.min(resource.start ?? 0, total - 1);
+        var end = resource.length == null
+            ? total - 1
+            : math.min(total - 1, start + resource.length! - 1);
+        // A single huge "segment" (whole file): only its head.
+        final allowance = math.max(budget - fetched, entry.chunkSize);
+        if (end - start + 1 > allowance) end = start + allowance - 1;
+        await _fetchRange(entry, start, end, task);
+        fetched += end - start + 1;
+        if (isSegment) segments++;
+        entry.touch();
+      } finally {
+        entry.pins--;
+        if (entry.pins == 0) unawaited(entry.closeIdleFile());
+      }
     }
   }
 

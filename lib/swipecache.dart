@@ -3,7 +3,7 @@
 library;
 
 export 'src/cache/cache_config.dart' show SwipeCacheConfig, SwipeCacheKeyBuilder;
-export 'src/cache/prefetcher.dart' show PrefetchRequest;
+export 'src/cache/prefetch_request.dart';
 export 'src/cache/swipe_cache.dart' show SwipeCache, SwipeCacheStats;
 export 'src/device/adaptive_policy.dart'
     show SwipeNetworkTier, SwipeResolvedLimits;
